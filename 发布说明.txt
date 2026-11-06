@@ -1,0 +1,6 @@
+States 1.0.3
+仅支持 macOS 26 及以上、Apple Silicon（arm64）Mac。
+应用使用 ad-hoc 本地签名，未使用 Apple Developer ID 签名，未通过 Apple 公证。首次打开可能被 macOS 阻止。
+本包附应用、源码、构建脚本及 MIT 许可证。详情见 README.md 和 Source/README.md。
+本包未附原用户的历史数据库或本机配置；安装到已有同名应用的电脑时，可能继续使用原有本地数据。
+States 读取本机系统指标；传感器可用性因机型而异。手动导出的 JSON 可能含设备指标，分享前请检查。

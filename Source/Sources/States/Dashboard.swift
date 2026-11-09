@@ -74,6 +74,7 @@ final class DetailGroup: Surface {
 final class DashboardController: NSViewController {
     private weak var owner: StatesAppDelegate?
     private let content = FlippedView(), overview = FlippedView(), power = FlippedView()
+    private let glass = PersonalizedGlassSurface(frame: .zero)
     private let pageHost = PageTransitionHost()
     private var pageTransition: PageTransitionController?
     private var pendingUpdate = false
@@ -81,13 +82,14 @@ final class DashboardController: NSViewController {
     private let timestamp = label("读取中", size: 11, color: .secondaryLabelColor)
     private let tabs = GlassSegmentControl(labels: ["概览", "电源"])
     private var tiles: [MetricTile] = []
+    let codexTile = CodexUsageTile(frame: NSRect(x: 286, y: 151, width: 258, height: 139))
     private var overviewIO: DetailGroup!, overviewThermal: DetailGroup!, powerDetails: DetailGroup!
     private let powerFlow = PowerFlowView()
     init(owner: StatesAppDelegate) { self.owner = owner; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
         let root = FlippedView(frame: NSRect(x: 0, y: 0, width: 560, height: 655))
-        let glass = NSGlassEffectView(frame: root.bounds); glass.style = .regular; glass.cornerRadius = 20; glass.autoresizingMask = [.width, .height]
+        glass.frame = root.bounds; glass.cornerRadius = 20; glass.autoresizingMask = [.width, .height]
         content.frame = root.bounds; content.autoresizingMask = [.width, .height]; glass.contentView = content; root.addSubview(glass); view = root
         timestamp.frame = NSRect(x: 20, y: 19, width: 450, height: 18); content.addSubview(timestamp)
         let settings = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")!, target: self, action: #selector(showSettings))
@@ -96,10 +98,11 @@ final class DashboardController: NSViewController {
         pageHost.frame = NSRect(x: 0, y: 92, width: 560, height: 563)
         pageHost.autoresizingMask = [.width, .height]; content.addSubview(pageHost)
         for page in [overview, power] { page.frame = NSRect(x: 0, y: 0, width: 560, height: 590); pageHost.addSubview(page) }
-        for (index, title) in ["CPU", "GPU", "内存", "整机功耗估计"].enumerated() {
+        for (index, title) in ["CPU", "GPU", "内存"].enumerated() {
             let tile = MetricTile(title: title, frame: NSRect(x: index % 2 == 0 ? 16 : 286, y: index < 2 ? 0 : 151, width: 258, height: 139))
             overview.addSubview(tile); tiles.append(tile)
         }
+        overview.addSubview(codexTile)
         overviewIO = DetailGroup(titles: ["网络下载 / 上传", "磁盘可用", "交换内存 / 压缩内存"], frame: NSRect(x: 16, y: 302, width: 528, height: 103)); overview.addSubview(overviewIO)
         overviewThermal = DetailGroup(titles: ["最高温区", "风扇转速", "系统热状态", "已运行"], frame: NSRect(x: 16, y: 417, width: 528, height: 130)); overview.addSubview(overviewThermal)
         powerFlow.frame = NSRect(x: 16, y: 0, width: 528, height: 240); power.addSubview(powerFlow)
@@ -135,13 +138,14 @@ final class DashboardController: NSViewController {
         if !force, pageTransition?.isAnimating == true { pendingUpdate = true; return }
         let reading = owner.engine.reading, smc = owner.engine.smc, p = reading.power
         view.appearance = owner.preferences.nativeAppearance
+        glass.apply(owner.preferences.glassAppearance); tabs.applyGlassAppearance(owner.preferences.glassAppearance)
         timestamp.stringValue = owner.isPaused ? "采样已暂停" : "\(DateFormatter.localizedString(from: reading.date, dateStyle: .none, timeStyle: .medium)) 更新"
         if tabs.selectedSegment == 0 {
             tiles[0].value.stringValue = DisplayFormat.percent(reading.cpu.usage); tiles[0].detail.stringValue = reading.cpu.modelName + " · \(reading.cpu.logicalCores) 核"
             tiles[1].value.stringValue = DisplayFormat.percent(reading.gpu.usage); tiles[1].detail.stringValue = reading.gpu.usage == nil ? "读数不可用" : reading.gpu.name + (reading.gpu.coreCount.map { " · \($0) 核" } ?? "")
             tiles[2].value.stringValue = reading.memory.available ? DisplayFormat.percent(reading.memory.fraction) : "—"
             tiles[2].detail.stringValue = reading.memory.available ? "\(DisplayFormat.bytes(reading.memory.used)) / \(DisplayFormat.bytes(reading.memory.total)) · 压力\(reading.memory.pressure)" : "内存读数不可用"
-            tiles[3].value.stringValue = DisplayFormat.watts(smc.systemWatts); tiles[3].detail.stringValue = "\(p.source) · \(p.state)"
+            updateCodexUsage()
             let histories: [[Double?]] = [owner.engine.history.map(\.cpu), owner.engine.history.map(\.gpu), owner.engine.history.map { $0.memory }, owner.engine.history.map(\.watts)]
             for (index, tile) in tiles.enumerated() { tile.setAccessibilityValue(tile.value.stringValue + " · " + tile.detail.stringValue); tile.chart.color = owner.preferences.color; tile.chart.maximum = index == 3 ? max(40, (histories[index].compactMap { $0 }.max() ?? 0) * 1.15) : 1; tile.chart.values = histories[index] }
             overviewIO.set(["↓ \(DisplayFormat.rate(reading.network.receivedPerSecond))    ↑ \(DisplayFormat.rate(reading.network.sentPerSecond))", reading.disk.total > 0 ? "\(DisplayFormat.diskBytes(reading.disk.available)) / \(DisplayFormat.diskBytes(reading.disk.total))" : "不可用", "\(reading.memory.swapAvailable ? DisplayFormat.bytes(reading.memory.swapUsed) : "不可用") / \(reading.memory.available ? DisplayFormat.bytes(reading.memory.compressed) : "不可用")"])
@@ -155,6 +159,10 @@ final class DashboardController: NSViewController {
                               p.voltage.flatMap { v in p.currentAmps.map { String(format: "%.2f V / %+.2f A", v, $0) } } ?? "—",
                               p.cycleCount.map { "\($0) 次" } ?? "—"])
         }
+    }
+    func updateCodexUsage() {
+        guard isViewLoaded, let owner else { return }
+        codexTile.update(owner.codexUsage, color: owner.preferences.color)
     }
     @objc private func showSettings() { owner?.showSettings() }
 }

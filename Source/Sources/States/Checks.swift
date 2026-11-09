@@ -9,9 +9,12 @@ enum InterfaceChecks {
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = StatesPreferences(defaults: defaults)
         let owner = StatesAppDelegate(preferences: preferences)
-        owner.engine.start()
-        RunLoop.main.run(until: Date().addingTimeInterval(2.5))
-        defer { owner.engine.stop() }
+        owner.engine.start(); owner.codexUsage.start()
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline && (owner.codexUsage.todayTokens == nil || owner.codexUsage.windows.isEmpty) {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        }
+        defer { owner.engine.stop(); owner.codexUsage.stop() }
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         func allViews(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(allViews) }
         func render(_ view: NSView, _ name: String) throws {
@@ -30,9 +33,56 @@ enum InterfaceChecks {
             tabs.selectedSegment = index; _ = tabs.sendAction(tabs.action, to: tabs.target)
             host.setContentSize(dashboard.targetContentSize); dashboard.update()
             try render(dashboard.view, name)
+            if index == 0 { try render(dashboard.codexTile, "codex-live") }
         }
+        let usageTile = CodexUsageTile(frame: NSRect(x: 0, y: 0, width: 258, height: 139))
+        let usageHost = NSWindow(contentRect: usageTile.bounds, styleMask: .borderless, backing: .buffered, defer: false)
+        usageHost.contentView = usageTile
+        for (name, remaining, tokens, stale) in [("codex-normal", 92.0, Int64(112345678), false),
+                                                ("codex-low", 5.0, Int64(1500000), false),
+                                                ("codex-stale", 92.0, Int64(112345678), true)] {
+            let now = Date()
+            usageTile.update(window: .init(remaining: remaining, resetsAt: now.addingTimeInterval(6 * 86400 + 5 * 3600 + 45 * 60 + 24)),
+                             tokens: tokens, stale: stale, color: .systemOrange, now: now)
+            for field in allViews(usageTile).compactMap({ $0 as? NSTextField }) {
+                precondition(field.intrinsicContentSize.width <= field.frame.width + 1, "Codex label would be clipped: \(field.stringValue)")
+            }
+            try render(usageTile, name)
+        }
+        usageTile.update(window: nil, tokens: nil, stale: true, color: .systemOrange)
+        try render(usageTile, "codex-unavailable")
         let settings = StatesSettingsController(owner: owner)
+        let menuPicker = allViews(settings.window!.contentView!).compactMap { $0 as? NSPopUpButton }
+            .first { $0.itemArray.contains { $0.representedObject as? String == "codex" } }
+        precondition(menuPicker?.itemArray.contains { $0.title == "Codex 剩余额度" } == true)
         try render(settings.window!.contentView!, "settings")
+        let settingsRoot = settings.window!.contentView!
+        let navigation = allViews(settingsRoot).compactMap { $0 as? NSTableView }
+            .first { $0.identifier?.rawValue == "states-settings-navigation" }!
+        navigation.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        precondition(preferences.glassAppearance.isStandard)
+        try render(settingsRoot, "personalization-default")
+        func control<T: NSControl>(_ id: String, as type: T.Type) -> T {
+            allViews(settingsRoot).first { $0.identifier?.rawValue == id } as! T
+        }
+        let strength = control("states-glass-strength", as: NSSlider.self)
+        let transparency = control("states-glass-transparency", as: NSSlider.self)
+        let colorMode = control("states-glass-color-mode", as: NSPopUpButton.self)
+        let colorWell = control("states-glass-color", as: NSColorWell.self)
+        strength.doubleValue = 160; _ = strength.sendAction(strength.action, to: strength.target)
+        transparency.doubleValue = 75; _ = transparency.sendAction(transparency.action, to: transparency.target)
+        colorMode.selectItem(at: 1); _ = colorMode.sendAction(colorMode.action, to: colorMode.target)
+        colorWell.color = NSColor(srgbRed: 0.35, green: 0.3, blue: 0.85, alpha: 1)
+        _ = colorWell.sendAction(colorWell.action, to: colorWell.target)
+        precondition(preferences.glassStrength == 160 && preferences.glassTransparency == 75 && preferences.glassColorMode == "custom")
+        try render(settingsRoot, "personalization-custom")
+        tabs.selectedSegment = 0; _ = tabs.sendAction(tabs.action, to: tabs.target)
+        host.setContentSize(dashboard.targetContentSize); dashboard.update()
+        try render(dashboard.view, "overview-custom-glass")
+        let reset = control("states-reset-glass", as: NSButton.self); reset.performClick(nil)
+        precondition(preferences.glassAppearance.isStandard)
+        dashboard.update(); try render(dashboard.view, "overview-reset-glass")
+        try render(settingsRoot, "personalization-reset")
         let flow = PowerFlowView(frame: NSRect(x: 0, y: 0, width: 528, height: 240))
         let flowHost = NSWindow(contentRect: flow.bounds, styleMask: .borderless, backing: .buffered, defer: false); flowHost.contentView = flow
         let cases: [(String, StatesCore.PowerReading, Double?)] = [

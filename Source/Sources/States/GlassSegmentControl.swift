@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import StatesCore
 
 /// Native glass selection whose view geometry follows the selected segment.
 final class GlassSegmentControl: NSControl {
@@ -11,6 +12,7 @@ final class GlassSegmentControl: NSControl {
     private var geometrySize: NSSize?
     private var buttons: [NSButton] = []
     private var index = 0
+    private var glassAppearance = GlassAppearance.standard
     var selectedSegment: Int {
         get { index }
         set { select(newValue, animated: false) }
@@ -38,6 +40,16 @@ final class GlassSegmentControl: NSControl {
         updateColors(); select(0, animated: false)
     }
     required init?(coder: NSCoder) { fatalError() }
+    func applyGlassAppearance(_ next: GlassAppearance) {
+        guard next != glassAppearance else { return }
+        glassAppearance = next
+        selection.style = next.strength < 0.7 ? .clear : .regular
+        selection.alphaValue = next.materialOpacity
+        selection.tintColor = next.tint?.withAlphaComponent(0.32)
+        if next.tint == nil, next.strength > 1 {
+            selection.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(next.reinforcement)
+        }
+    }
     override var acceptsFirstResponder: Bool { true }
     override func layout() {
         super.layout()

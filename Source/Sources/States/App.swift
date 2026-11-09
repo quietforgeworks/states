@@ -11,7 +11,7 @@ import StatesCore
             catch { fputs("Interface check failed: \(error)\n", stderr); exit(1) }
         }
         if CommandLine.arguments.contains("--self-test") {
-            do { try runMetricsSelfTests(); try MenuPresentation.checkStableWidth(); try MotionChecks.run(); print("States self-tests passed."); return }
+            do { try runMetricsSelfTests(); try MenuPresentation.checkStableWidth(); try MotionChecks.run(); try GlassCustomizationChecks.run(); print("States self-tests passed."); return }
             catch { fputs("States self-test failed: \(error)\n", stderr); exit(1) }
         }
         if CommandLine.arguments.contains("--probe") {
@@ -21,6 +21,23 @@ import StatesCore
             let result = Probe(system: sampler.sample(), smc: SMCDevice().snapshot())
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             if let data = try? encoder.encode(result) { FileHandle.standardOutput.write(data); print("") }
+            return
+        }
+        if CommandLine.arguments.contains("--probe-usage") {
+            let usage = CodexUsageService(); usage.start()
+            let deadline = Date().addingTimeInterval(40)
+            while Date() < deadline && (usage.todayTokens == nil || usage.windows.isEmpty) {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            }
+            usage.stop()
+            var result: [String: Any] = ["windows": usage.windows.count, "stale": usage.isStale]
+            result["remaining"] = usage.window?.remaining
+            result["countdown"] = CodexUsageFormat.countdown(usage.window?.resetsAt)
+            result["todayTokens"] = usage.todayTokens
+            result["today"] = CodexUsageFormat.millions(usage.todayTokens)
+            if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
+                FileHandle.standardOutput.write(data); print("")
+            }
             return
         }
         let app = NSApplication.shared; app.setActivationPolicy(.accessory)
@@ -34,6 +51,8 @@ final class StatesAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
     init(preferences: StatesPreferences = StatesPreferences()) { self.preferences = preferences; super.init() }
     lazy var engine = MonitorEngine(prefs: preferences)
     let awake = AwakeController()
+    let codexUsage = CodexUsageService()
+    private var usageTick: Timer?
     private var item: NSStatusItem!
     private let popover = NSPopover()
     private var transitionAnchor: NSPoint?
@@ -51,23 +70,27 @@ final class StatesAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
         appMenu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         application.submenu = appMenu; main.addItem(application); NSApp.mainMenu = main
         item = NSStatusBar.system.statusItem(withLength: MenuPresentation.width(for: preferences.menuMetric))
-        item.button?.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "系统状态")
-        item.button?.image?.size = NSSize(width: 16, height: 16)
-        item.button?.image?.isTemplate = true; item.button?.imagePosition = .imageLeading
+        item.button?.image = nil; item.button?.imagePosition = .noImage
         item.button?.target = self; item.button?.action = #selector(statusClicked)
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         dashboard = DashboardController(owner: self); popover.contentViewController = dashboard
         popover.contentSize = NSSize(width: 560, height: 655); popover.behavior = .transient; popover.animates = true; popover.delegate = self
         engine.onUpdate = { [weak self] in self?.update() }
+        codexUsage.onUpdate = { [weak self] in self?.update() }
+        let tick = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, self.popover.isShown else { return }
+            self.dashboard.updateCodexUsage()
+        }
+        RunLoop.main.add(tick, forMode: .common); usageTick = tick
         awake.onChange = { [weak self] in if self?.settings?.window?.isVisible == true { self?.settings?.refreshState() } }
         let center = NSWorkspace.shared.notificationCenter
         workspaceTokens.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.engine.stop(); self?.popover.performClose(nil)
+            self?.engine.stop(); self?.codexUsage.stop(); self?.popover.performClose(nil)
         })
         workspaceTokens.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }; if !self.isPaused { self.engine.start() }
+            guard let self else { return }; if !self.isPaused { self.engine.start(); self.codexUsage.start() }
         })
-        engine.start(); update()
+        engine.start(); codexUsage.start(); update()
         if CommandLine.arguments.contains("--show-settings") { DispatchQueue.main.async { self.showSettings() } }
         else if !preferences.defaults.bool(forKey: "hasLaunched") || CommandLine.arguments.contains("--show") {
             preferences.defaults.set(true, forKey: "hasLaunched")
@@ -77,7 +100,7 @@ final class StatesAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showDashboard(); return true }
     func applicationDidBecomeActive(_ notification: Notification) { settings?.refreshState() }
     func applicationWillTerminate(_ notification: Notification) {
-        engine.stop(); awake.disable()
+        engine.stop(); codexUsage.stop(); usageTick?.invalidate(); awake.disable()
         for token in workspaceTokens { NSWorkspace.shared.notificationCenter.removeObserver(token) }
     }
     func popoverDidShow(_ notification: Notification) { dashboard.update() }
@@ -163,13 +186,18 @@ final class StatesAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
     }
     private func update() {
         let sample = engine.reading
-        let text = " " + MenuPresentation.caption(metric: preferences.menuMetric, system: sample, smc: engine.smc)
+        let text = MenuPresentation.caption(metric: preferences.menuMetric, system: sample, smc: engine.smc,
+            codexRemaining: codexUsage.isStale ? nil : codexUsage.window?.remaining)
         let width = MenuPresentation.width(for: preferences.menuMetric)
         if item?.length != width { item?.length = width }
         if item?.button?.attributedTitle.string != text {
             item?.button?.attributedTitle = NSAttributedString(string: text, attributes: [.font: MenuPresentation.font])
         }
         item?.button?.toolTip = "CPU \(DisplayFormat.percent(sample.cpu.usage)) · GPU \(DisplayFormat.percent(sample.gpu.usage)) · 内存 \(DisplayFormat.bytes(sample.memory.used))"
+        if preferences.menuMetric == "codex" {
+            item?.button?.toolTip = codexUsage.isStale ? "Codex 额度等待同步" :
+                "Codex 剩余 \(CodexUsageFormat.remaining(codexUsage.window?.remaining)) · 距离自动恢复 \(CodexUsageFormat.countdown(codexUsage.window?.resetsAt))"
+        }
         if popover.isShown { dashboard.update() }
     }
     func preferencesChanged() {
@@ -182,7 +210,7 @@ final class StatesAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
         catch { alert("无法更改登录启动", error.localizedDescription) }
         settings?.refreshState()
     }
-    @objc private func togglePause() { isPaused.toggle(); if isPaused { engine.stop() } else { engine.start() }; update(); dashboard.update() }
+    @objc private func togglePause() { isPaused.toggle(); if isPaused { engine.stop(); codexUsage.stop() } else { engine.start(); codexUsage.start() }; update(); dashboard.update() }
     @objc func exportSnapshot() {
         popover.performClose(nil)
         let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "系统状态.json"
